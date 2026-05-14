@@ -1,4 +1,3 @@
-
 #include "cpu.h"
 #include "timer.h"
 #include "sched.h"
@@ -65,9 +64,20 @@ static void * cpu_routine(void * args) {
                            continue; /* First load failed. skip dummy load */
                         }
 		}else if (proc->pc == proc->code->size) {
-			/* The porcess has finish it job */
+			/* The process has finish it job */
 			printf("\tCPU %d: Processed %2d has finished\n",
 				id ,proc->pid);
+			/* FIX: free per-process krnl and mm before freeing pcb */
+#ifdef MM_PAGING
+			if (proc->krnl != NULL) {
+				if (proc->krnl->mm != NULL) {
+					free(proc->krnl->mm);
+					proc->krnl->mm = NULL;
+				}
+				free(proc->krnl);
+				proc->krnl = NULL;
+			}
+#endif
 			free(proc);
 			proc = get_proc();
 			time_left = 0;
@@ -109,6 +119,7 @@ static void * ld_routine(void * args) {
 	struct memphy_struct* mram = ((struct mmpaging_ld_args *)args)->mram;
 	struct memphy_struct** mswp = ((struct mmpaging_ld_args *)args)->mswp;
 	struct memphy_struct* active_mswp = ((struct mmpaging_ld_args *)args)->active_mswp;
+	int active_mswp_id = ((struct mmpaging_ld_args *)args)->active_mswp_id;
 	struct timer_id_t * timer_id = ((struct mmpaging_ld_args *)args)->timer_id;
 #else
 	struct timer_id_t * timer_id = (struct timer_id_t*)args;
@@ -137,7 +148,17 @@ static void * ld_routine(void * args) {
 	printf("ld_routine\n");
 	while (i < num_processes) {
 		struct pcb_t * proc = load(ld_processes.path[i]);
-		struct krnl_t * krnl = proc->krnl = &os;	
+
+		/*
+		 * FIX: Allocate a per-process krnl_t instead of sharing &os.
+		 * Sharing &os caused krnl->mm to be overwritten each time a new
+		 * process was loaded, corrupting the mm of already-running processes
+		 * and triggering a segfault.
+		 */
+		struct krnl_t * krnl = malloc(sizeof(struct krnl_t));
+		/* Copy shared OS-level fields (page table directories, queues) */
+		*krnl = os;
+		proc->krnl = krnl;
 
 #ifdef MLQ_SCHED
 		proc->prio = ld_processes.prio[i];
@@ -146,11 +167,13 @@ static void * ld_routine(void * args) {
 			next_slot(timer_id);
 		}
 #ifdef MM_PAGING
+		/* Each process gets its own mm_struct */
 		krnl->mm = malloc(sizeof(struct mm_struct));
 		init_mm(krnl->mm, proc);
 		krnl->mram = mram;
 		krnl->mswp = mswp;
 		krnl->active_mswp = active_mswp;
+		krnl->active_mswp_id = active_mswp_id;
 #endif
 		printf("\tLoaded a process at %s, PID: %d PRIO: %ld\n",
 			ld_processes.path[i], proc->pid, ld_processes.prio[i]);
@@ -299,6 +322,3 @@ int main(int argc, char * argv[]) {
 	return 0;
 
 }
-
-
-
